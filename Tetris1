@@ -1,0 +1,279 @@
+#include <iostream>
+#include <Windows.h>
+#include <thread>
+#include <vector>
+#include <fstream>
+#include <winuser.h>
+
+#define XPADDING 34
+#define YPADDING 5
+
+using namespace std;
+
+// Screen buffer class
+class Screen
+{
+public:
+    Screen(int, int);
+
+    const int screenWidth;
+    const int screenHeight;
+    wchar_t* screen;
+    HANDLE hConsole;
+    DWORD dwBytesWritten;
+};
+
+Screen::Screen(int screenWidth, int screenHeight)
+    : screenWidth(screenWidth), screenHeight(screenHeight)
+{
+    screen = new wchar_t[screenWidth * screenHeight];
+    for (int i = 0; i < screenWidth * screenHeight; i++) screen[i] = L' ';
+    hConsole = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, 0, NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+    SetConsoleActiveScreenBuffer(hConsole);
+    dwBytesWritten = 0;
+}
+
+// Tetromino Class
+class Tetromino
+{
+public:
+    Tetromino(wstring, int, int, int);
+
+    int currentY;
+    int currentX;
+    int currentRotation;
+    wstring layout;
+
+    int rotate(int, int);
+};
+
+Tetromino::Tetromino(wstring layout, int startingX, int startingY, int startingRotation)
+    : layout(layout), currentY(startingY), currentX(startingX), currentRotation(startingRotation)
+{}
+
+int Tetromino::rotate(int x, int y)
+{
+    switch (currentRotation % 4) {
+    case 0: return y * 4 + x;          // 0 degrees
+    case 1: return 12 + y - (x * 4);   // 90 degrees
+    case 2: return 15 - (y * 4) - x;   // 180 degrees
+    case 3: return 3 - y + (x * 4);    // 270 degrees
+    }
+    return 0;
+}
+
+// Playing Field Class
+class PlayingField
+{
+public:
+    PlayingField(int, int);
+
+    const int fieldWidth;
+    const int fieldHeight;
+    unsigned char* fieldBuffer;
+
+    bool doesPieceFit(Tetromino*, int, int, int);
+};
+
+PlayingField::PlayingField(int fieldWidth, int fieldHeight)
+    : fieldWidth(fieldWidth), fieldHeight(fieldHeight), fieldBuffer(nullptr)
+{
+    fieldBuffer = new unsigned char[fieldHeight * fieldWidth];
+    for (int x = 0; x < fieldWidth; x++)
+        for (int y = 0; y < fieldHeight; y++)
+            fieldBuffer[y * fieldWidth + x] = (x == 0 || x == fieldWidth - 1 || y == fieldHeight - 1) ? 9 : 0;
+}
+
+bool PlayingField::doesPieceFit(Tetromino* tetromino, int rotation, int x, int y)
+{
+    for (int pointX = 0; pointX < 4; pointX++)
+        for (int pointY = 0; pointY < 4; ++pointY) {
+            int pieceIndex = tetromino->rotate(pointX, pointY);
+            int fieldIndex = (y + pointY) * fieldWidth + (x + pointX);
+            if (x + pointX >= 0 && x + pointX < fieldWidth)
+                if (y + pointY >= 0 && y + pointY < fieldHeight)
+                    if (tetromino->layout[pieceIndex] == L'X' && fieldBuffer[fieldIndex] != 0)
+                        return false;
+        }
+    return true;
+}
+
+// Game class
+class Tetris
+{
+public:
+    Tetris(Screen*, PlayingField*, int);
+
+    bool gameOver;
+    int score;
+
+    void draw();
+    void checkLines();
+    void computeNextState();
+    void lockPieceOnField();
+    void processInput();
+    void synchronizeMovement();
+
+private:
+    int lines;
+    int speed;
+    int nextPieceIndex;
+    int pieceCount;
+    int currentPieceIndex;
+    int speedCounter;
+    bool key[4];
+    bool forceDown;
+    bool rotationHold;
+    Screen* screenBuffer;
+    Tetromino* tetromino[7];
+    PlayingField* playingField;
+    vector<int> fullLines;
+};
+
+Tetris::Tetris(Screen* screenBuffer, PlayingField* playingField, int speed)
+    : speed(speed), screenBuffer(screenBuffer), playingField(playingField)
+{
+    score = 0;
+    lines = 0;
+    pieceCount = 0;
+    speedCounter = 0;
+    gameOver = false;
+    forceDown = false;
+    nextPieceIndex = rand() % 7;
+    currentPieceIndex = rand() % 7;
+
+    int startingPieceX = playingField->fieldWidth / 2;
+    tetromino[0] = new Tetromino(L"..X...X...X...X.", startingPieceX, 0, 0);
+    tetromino[1] = new Tetromino(L"..X..XX...X.....", startingPieceX, 0, 0);
+    tetromino[2] = new Tetromino(L".....XX..XX.....", startingPieceX, 0, 0);
+    tetromino[3] = new Tetromino(L"..X..XX..X......", startingPieceX, 0, 0);
+    tetromino[4] = new Tetromino(L".X...XX...X.....", startingPieceX, 0, 0);
+    tetromino[5] = new Tetromino(L".X...X...XX.....", startingPieceX, 0, 0);
+    tetromino[6] = new Tetromino(L"..X...X..XX.....", startingPieceX, 0, 0);
+
+    rotationHold = true;
+}
+
+void Tetris::synchronizeMovement()
+{
+    this_thread::sleep_for(50ms);
+    speedCounter++;
+    forceDown = (speed == speedCounter);
+}
+
+void Tetris::processInput()
+{
+    for (int signKey = 0; signKey < 4; ++signKey)
+        key[signKey] = (0x8000 & GetAsyncKeyState((unsigned char)("\x27\x25\x28\x26Z"[signKey]))) != 0;
+
+    Tetromino* currentTetromino = tetromino[currentPieceIndex];
+    currentTetromino->currentX += (key[0] && playingField->doesPieceFit(currentTetromino, currentTetromino->currentRotation, currentTetromino->currentX + 1, currentTetromino->currentY)) ? 1 : 0;
+    currentTetromino->currentX -= (key[1] && playingField->doesPieceFit(currentTetromino, currentTetromino->currentRotation, currentTetromino->currentX - 1, currentTetromino->currentY)) ? 1 : 0;
+    currentTetromino->currentY += (key[2] && playingField->doesPieceFit(currentTetromino, currentTetromino->currentRotation, currentTetromino->currentX, currentTetromino->currentY + 1)) ? 1 : 0;
+
+    if (key[3]) {
+        currentTetromino->currentRotation += (rotationHold && playingField->doesPieceFit(currentTetromino, currentTetromino->currentRotation + 1, currentTetromino->currentX, currentTetromino->currentY)) ? 1 : 0;
+        rotationHold = false;
+    }
+    else {
+        rotationHold = true;
+    }
+}
+
+void Tetris::computeNextState()
+{
+    if (forceDown) {
+        Tetromino* currentTetromino = tetromino[currentPieceIndex];
+        if (playingField->doesPieceFit(currentTetromino, currentTetromino->currentRotation, currentTetromino->currentX, currentTetromino->currentY + 1)) {
+            currentTetromino->currentY++;
+        }
+        else {
+            lockPieceOnField();
+            currentPieceIndex = nextPieceIndex;
+            nextPieceIndex = rand() % 7;
+            tetromino[currentPieceIndex]->currentRotation = 0;
+            tetromino[currentPieceIndex]->currentY = 0;
+            tetromino[currentPieceIndex]->currentX = playingField->fieldWidth / 2;
+            pieceCount++;
+            if (pieceCount % 10 == 0)
+                if (speed >= 10) speed--;
+            checkLines();
+            score += 25;
+            if (!fullLines.empty()) score += (1 << fullLines.size()) * 100;
+            gameOver = !playingField->doesPieceFit(tetromino[currentPieceIndex], tetromino[currentPieceIndex]->currentRotation, tetromino[currentPieceIndex]->currentX, tetromino[currentPieceIndex]->currentY);
+        }
+        speedCounter = 0;
+    }
+}
+
+void Tetris::checkLines()
+{
+    for (int y = 0; y < 4; y++)
+        if (tetromino[currentPieceIndex]->currentY + y < playingField->fieldHeight - 1) {
+            bool line = true;
+            for (int x = 1; x < playingField->fieldWidth - 1; x++)
+                line &= (playingField->fieldBuffer[(tetromino[currentPieceIndex]->currentY + y) * playingField->fieldWidth + x]) != 0;
+
+            if (line) {
+                for (int x = 1; x < playingField->fieldWidth - 1; x++)
+                    playingField->fieldBuffer[(tetromino[currentPieceIndex]->currentY + y) * playingField->fieldWidth + x] = 8;
+                fullLines.push_back(tetromino[currentPieceIndex]->currentY + y);
+            }
+        }
+
+    if (!fullLines.empty()) {
+        for (auto& v : fullLines)
+            for (int px = 1; px < playingField->fieldWidth - 1; px++) {
+                for (int py = v; py > 0; py--)
+                    playingField->fieldBuffer[py * playingField->fieldWidth + px] = playingField->fieldBuffer[(py - 1) * playingField->fieldWidth + px];
+                playingField->fieldBuffer[px] = 0;
+            }
+        fullLines.clear();
+    }
+}
+
+void Tetris::lockPieceOnField()
+{
+    Tetromino* currentTetromino = tetromino[currentPieceIndex];
+    for (int pointX = 0; pointX < 4; pointX++)
+        for (int pointY = 0; pointY < 4; pointY++) {
+            if (currentTetromino->layout[currentTetromino->rotate(pointX, pointY)] == L'X')
+                playingField->fieldBuffer[(currentTetromino->currentY + pointY) * playingField->fieldWidth + (currentTetromino->currentX + pointX)] = currentPieceIndex + 1;
+        }
+}
+
+void Tetris::draw()
+{
+    for (int x = 0; x < playingField->fieldWidth; x++)
+        for (int y = 0; y < playingField->fieldHeight; y++)
+            screenBuffer->screen[(y + YPADDING) * screenBuffer->screenWidth + (x + XPADDING)] = L" ABCDEFG=#"[playingField->fieldBuffer[y * playingField->fieldWidth + x]];
+
+    Tetromino* currentTetromino = tetromino[currentPieceIndex];
+    for (int pointX = 0; pointX < 4; pointX++)
+        for (int pointY = 0; pointY < 4; pointY++)
+            if (currentTetromino->layout[currentTetromino->rotate(pointX, pointY)] == L'X')
+                screenBuffer->screen[(currentTetromino->currentY + pointY + YPADDING) * screenBuffer->screenWidth + (currentTetromino->currentX + pointX + XPADDING)] = currentPieceIndex + 65;
+
+    swprintf_s(&screenBuffer->screen[2 * screenBuffer->screenWidth + XPADDING + 18], 16, L"SCORE: %8d", score);
+
+    WriteConsoleOutputCharacter(screenBuffer->hConsole, screenBuffer->screen, screenBuffer->screenWidth * screenBuffer->screenHeight, { 0,0 }, &screenBuffer->dwBytesWritten);
+}
+
+int main()
+{
+    Screen screen(80, 30);
+    PlayingField field(12, 18);
+    Tetris game(&screen, &field, 20);
+
+    while (!game.gameOver) {
+        game.synchronizeMovement();
+        game.processInput();
+        game.computeNextState();
+        game.draw();
+    }
+
+    CloseHandle(screen.hConsole);
+    cout << "Game Over!! Score:" << game.score << endl;
+    system("pause");
+    return 0;
+}
